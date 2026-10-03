@@ -1,0 +1,211 @@
+#!/bin/sh
+# rf35h-gtasa -- GTA: San Andreas on the XiFan RF35H (Lakka)
+#
+#   rf35h-gtasa start [fps=30|60] [scale=N] [perf=0|1|2] [swap_ab=0|1]
+#                     [show_fps=0|1] [stats=0|1]
+#       from the launcher core: write the options into gtasa_nx.cfg and
+#       start rf35h-gtasa.service (which stops RetroArch)
+#   rf35h-gtasa run       the service's main process: run the game, then add
+#                         the play time to RetroArch's runtime log
+#   rf35h-gtasa import    install from the APK and OBB in the game folder,
+#                         then validate (gtasa --import, gtasa --check)
+#   rf35h-gtasa check     validate the installed files
+#   rf35h-gtasa slim [--yes]
+#                         list (or, with --yes, delete) the texture database
+#                         variants the game never opened according to gtasa.log
+#
+# Environment: GTASA_DIR (default /storage/roms/gtasa), GTASA_BIN (default
+# /usr/bin/gtasa), RA_CFG (default /storage/.config/retroarch/retroarch.cfg),
+# RA_LOGS (default: from RA_CFG, as RetroArch finds its runtime logs),
+# SYSTEMCTL, UPTIME_FILE (default /proc/uptime).
+set -u
+
+GTASA_DIR=${GTASA_DIR:-/storage/roms/gtasa}
+GTASA_BIN=${GTASA_BIN:-/usr/bin/gtasa}
+RA_CFG=${RA_CFG:-/storage/.config/retroarch/retroarch.cfg}
+SYSTEMCTL=${SYSTEMCTL:-systemctl}
+UPTIME_FILE=${UPTIME_FILE:-/proc/uptime}
+CFG="$GTASA_DIR/gtasa_nx.cfg"
+CORE_NAME="GTA San Andreas" # corename in gtasa_libretro.info
+
+die() {
+  echo "rf35h-gtasa: $*" >&2
+  exit 1
+}
+
+# ra_cfg KEY: a path setting from retroarch.cfg, "" when unset or "default",
+# a leading ~ expanded as RetroArch does
+ra_cfg() {
+  [ -f "$RA_CFG" ] || return 0
+  v=$(sed -n "s|^$1[[:space:]]*=[[:space:]]*\"\(.*\)\"[[:space:]]*\$|\1|p" "$RA_CFG" | tail -n 1)
+  [ "$v" = default ] && v=""
+  case "$v" in "~"*) v="${HOME:-/storage}${v#\~}" ;; esac
+  printf '%s' "$v"
+}
+
+# RetroArch's runtime logs (runtime_file.c): runtime_log_directory, or
+# logs/ under playlist_directory
+ra_logs() {
+  d=$(ra_cfg runtime_log_directory)
+  if [ -n "$d" ]; then
+    printf '%s' "$d"
+  else
+    d=$(ra_cfg playlist_directory)
+    printf '%s/logs' "${d:-/storage/playlists}"
+  fi
+}
+RA_LOGS=${RA_LOGS:-$(ra_logs)}
+
+# seconds since boot: unlike the wall clock, NTP cannot move it (the RF35H
+# has no RTC; the clock jumps when the network comes up)
+uptime_s() {
+  cut -d. -f1 "$UPTIME_FILE"
+}
+
+# set_opt KEY VALUE: replace the "KEY value" line, or add it
+set_opt() {
+  if grep -q "^$1[[:space:]]" "$CFG" 2>/dev/null; then
+    sed -i "s|^$1[[:space:]].*|$1 $2|" "$CFG"
+  else
+    echo "$1 $2" >> "$CFG"
+  fi
+}
+
+is_num() {
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+# apply_opt KEY=VALUE [dry]: check one launcher option, and set it unless dry
+apply_opt() {
+  key=${1%%=*}
+  val=${1#*=}
+  case "$key" in
+    fps)
+      case "$val" in 30) cfgkey=fps_cap_30 cfgval=1 ;; 60) cfgkey=fps_cap_30 cfgval=0 ;; *) return 1 ;; esac ;;
+    scale)
+      is_num "$val" && [ "$val" -ge 50 ] && [ "$val" -le 100 ] || return 1
+      cfgkey=render_scale cfgval=$val ;;
+    perf)
+      case "$val" in 0 | 1 | 2) cfgkey=perf_mode cfgval=$val ;; *) return 1 ;; esac ;;
+    swap_ab | show_fps | stats)
+      case "$val" in 0 | 1) cfgkey=$key cfgval=$val ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  [ -n "${2:-}" ] || set_opt "$cfgkey" "$cfgval"
+}
+
+cmd_start() {
+  [ -x "$GTASA_BIN" ] || die "$GTASA_BIN missing"
+  for kv in "$@"; do
+    apply_opt "$kv" dry || die "bad option $kv"
+  done
+  mkdir -p "$GTASA_DIR"
+  "$GTASA_BIN" -d "$GTASA_DIR" --write-config || die "cannot write $CFG"
+  for kv in "$@"; do
+    apply_opt "$kv"
+  done
+  rm -f "$GTASA_DIR/last-error.txt"
+  exec "$SYSTEMCTL" start --no-block rf35h-gtasa.service
+}
+
+# add_runtime SECONDS: RetroArch's runtime log of the launcher core (the
+# format of runtime_file.c; RetroArch itself counted the session when it
+# unloaded the core, so play_count only starts at 1 when there was no file)
+add_runtime() {
+  dir="$RA_LOGS/$CORE_NAME"
+  file="$dir/$CORE_NAME.lrtl"
+  mkdir -p "$dir" || return
+  rt="0:00:00"
+  count=""
+  if [ -f "$file" ]; then
+    rt=$(sed -n 's/.*"runtime": *"\([0-9]*:[0-9]*:[0-9]*\)".*/\1/p' "$file")
+    count=$(sed -n 's/.*"play_count": *"\([0-9]*\)".*/\1/p' "$file")
+  fi
+  total=$(echo "${rt:-0:00:00}" | awk -F: -v add="$1" '{ print $1 * 3600 + $2 * 60 + $3 + add }')
+  is_num "$count" || count=1
+  printf '{\n  "version": "1.0",\n  "runtime": "%d:%02d:%02d",\n  "last_played": "%s",\n  "play_count": "%d",\n  "state_slot": "0"\n}\n' \
+    $((total / 3600)) $((total % 3600 / 60)) $((total % 60)) "$(date '+%Y-%m-%d %H:%M:%S')" "$count" \
+    > "$file.tmp" && mv "$file.tmp" "$file"
+}
+
+cmd_run() {
+  cd "$GTASA_DIR" || die "no $GTASA_DIR"
+  GTASA_DIR=$(pwd) # absolute from here on
+  # systemd's SIGTERM reaches every process of the unit: the game leaves
+  # within 5 s, and the shell, which only notes the signal (a caught signal,
+  # unlike an ignored one, is not inherited), waits for it and then does
+  # the accounting
+  trap ':' TERM INT
+  t0=$(uptime_s)
+  "$GTASA_BIN" -d "$GTASA_DIR"
+  rc=$?
+  t1=$(uptime_s)
+  is_num "$t0" && is_num "$t1" && [ "$t1" -gt "$t0" ] && add_runtime $((t1 - t0))
+  if [ $rc -ne 0 ] && [ ! -s "$GTASA_DIR/last-error.txt" ]; then
+    echo "il gioco e' uscito con codice $rc (vedi gtasa.log)" > "$GTASA_DIR/last-error.txt"
+  fi
+  return $rc
+}
+
+status_line() {
+  printf '%s\n' "$*" > "$GTASA_DIR/import-status.txt.tmp" &&
+    mv "$GTASA_DIR/import-status.txt.tmp" "$GTASA_DIR/import-status.txt"
+}
+
+cmd_import() {
+  mkdir -p "$GTASA_DIR" || return 2
+  # the importer locks this descriptor: the lock then lasts until this
+  # shell exits, so through the check too (the launcher waits on it). A
+  # failed redirection on exec would end the shell: try it in a subshell.
+  lock="$GTASA_DIR/.import.lock"
+  (: >> "$lock") 2> /dev/null || { echo "rf35h-gtasa: cannot write $lock" >&2; return 2; }
+  exec 9>> "$lock"
+  GTASA_LOCK_FD=9 "$GTASA_BIN" -d "$GTASA_DIR" --import || return $?
+  out=$("$GTASA_BIN" -d "$GTASA_DIR" --check 2>&1)
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    why=$(printf '%s\n' "$out" | grep -m1 -E 'FAIL|gtasa:' | sed 's/^gtasa: //')
+    status_line "fail 100 file installati ma non utilizzabili: ${why:-vedi gtasa-check.log}"
+    echo "Installazione: ${why:-vedi gtasa-check.log}" > "$GTASA_DIR/last-error.txt"
+    return $rc
+  fi
+  rm -f "$GTASA_DIR/last-error.txt"
+  return 0
+}
+
+cmd_check() {
+  exec "$GTASA_BIN" -d "$GTASA_DIR" --check
+}
+
+# texdb/<db>/<db>.<fmt>.{dat,tmb,toc}: keep the formats gtasa.log shows in use
+cmd_slim() {
+  log="$GTASA_DIR/gtasa.log"
+  [ -f "$log" ] || die "no gtasa.log yet: play once first"
+  used=$(sed -n 's|.*data: texture database texdb/[^ ]*\.\([a-z0-9]*\)\.dat$|\1|p' "$log" | sort -u)
+  [ -n "$used" ] || die "gtasa.log names no texture database: play until the menu first"
+  echo "in use: $(echo $used)"
+  freed=0
+  for f in "$GTASA_DIR"/texdb/*/*.*.dat "$GTASA_DIR"/texdb/*/*.*.tmb "$GTASA_DIR"/texdb/*/*.*.toc; do
+    [ -f "$f" ] || continue
+    fmt=$(basename "$f" | awk -F. '{ print $(NF-1) }')
+    echo "$used" | grep -qx "$fmt" && continue
+    size=$(du -k "$f" | cut -f1)
+    freed=$((freed + size))
+    if [ "${1:-}" = "--yes" ]; then
+      rm -f "$f" && echo "deleted $f"
+    else
+      echo "unused: $f"
+    fi
+  done
+  [ "${1:-}" = "--yes" ] && echo "freed $((freed / 1024)) MB" || echo "$((freed / 1024)) MB in unused variants; rerun with --yes to delete"
+}
+
+case "${1:-}" in
+  start) shift; cmd_start "$@" ;;
+  run) cmd_run ;;
+  import) cmd_import ;;
+  check) cmd_check ;;
+  slim) shift; cmd_slim "$@" ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

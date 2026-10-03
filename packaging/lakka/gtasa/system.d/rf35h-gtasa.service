@@ -1,0 +1,18 @@
+[Unit]
+Description=GTA: San Andreas (RF35H)
+# RetroArch must be gone first: it holds the audio device and the screen
+Conflicts=retroarch.service
+After=retroarch.service graphical.target
+Requires=graphical.target
+
+[Service]
+# what RetroArch runs with (Wayland socket, ALSA card, user settings)
+EnvironmentFile=/usr/lib/retroarch/retroarch-env.conf
+EnvironmentFile=-/run/libreelec/retroarch.conf
+EnvironmentFile=-/storage/.cache/services/retroarch.conf
+Environment=HOME=/storage
+ExecStart=/usr/bin/rf35h-gtasa run
+# back to RetroArch however the game ended
+ExecStopPost=-/usr/bin/systemctl --no-block start retroarch.service
+TimeoutStopSec=15
+Restart=no

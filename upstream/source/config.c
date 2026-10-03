@@ -1,0 +1,112 @@
+/* config.c -- simple configuration parser
+ *
+ * Copyright (C) 2021 Andy Nguyen, fgsfds
+ *
+ * This software may be modified and distributed under the terms
+ * of the MIT license.  See the LICENSE file for details.
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+
+#include "config.h"
+
+#define CONFIG_VARS \
+  CONFIG_VAR_INT(screen_width); \
+  CONFIG_VAR_INT(screen_height); \
+  CONFIG_VAR_INT(trilinear_filter); \
+  CONFIG_VAR_INT(show_fps); \
+  CONFIG_VAR_INT(fps_cap_30); \
+  CONFIG_VAR_INT(auto_boot_delay); \
+  CONFIG_VAR_INT(ps2_corona_rotation); \
+  CONFIG_VAR_INT(ps2_color_filter); \
+  CONFIG_VAR_INT(sprint_any_surface); \
+  CONFIG_VAR_INT(remove_air_resistance); \
+  CONFIG_VAR_INT(show_wanted_stars); \
+  CONFIG_VAR_INT(disable_ped_spec); \
+  CONFIG_VAR_INT(no_offscreen_despawn); \
+  CONFIG_VAR_INT(mobile_widgets); \
+  CONFIG_VAR_INT(fuzzy_seek);
+
+Config config;
+
+// actual screen size in use
+int screen_width = 1280;
+int screen_height = 720;
+
+static inline void parse_var(const char *name, const char *value) {
+  #define CONFIG_VAR_INT(var) if (!strcmp(name, #var)) { config.var = atoi(value); return; }
+  #define CONFIG_VAR_FLOAT(var) if (!strcmp(name, #var)) { config.var = atof(value); return; }
+  #define CONFIG_VAR_STR(var) if (!strcmp(name, #var)) { strlcpy(config.var, value, sizeof(config.var)); return; }
+  CONFIG_VARS
+  #undef CONFIG_VAR_INT
+  #undef CONFIG_VAR_FLOAT
+  #undef CONFIG_VAR_STR
+}
+
+int read_config(const char *file) {
+  char line[1024] = { 0 };
+
+  memset(&config, 0, sizeof(Config));
+  config.screen_width = -1; // auto
+  config.screen_height = -1;
+  config.trilinear_filter = 1;
+  config.show_fps = 0; // small FPS counter in the top left corner
+  config.fps_cap_30 = 0;
+  config.auto_boot_delay = 3;
+  config.ps2_corona_rotation = 1; // PS2 corona rotation on by default
+  config.ps2_color_filter = 1;    // PS2 color filter on by default
+  config.sprint_any_surface = 0;    // off by default (stock)
+  config.remove_air_resistance = 0; // off by default (stock)
+  config.show_wanted_stars = 0;     // off by default (stock: stars only when wanted)
+  config.disable_ped_spec = 1;      // on by default (remove ped/character specular shine)
+  config.no_offscreen_despawn = 1;  // on by default (cars/peds stay off-screen)
+  config.mobile_widgets = 0;        // off by default = hide the mobile touch widgets
+  config.fuzzy_seek = 1;            // on by default (skip useless mpg123 data on seek)
+
+  FILE *f = fopen(file, "r");
+  if (f == NULL)
+    return -1;
+
+  // each line is either a '#' comment or "NAME VALUE" (surrounding space ok)
+  do {
+    char *name = NULL, *value = NULL, *tmp = NULL;
+    if (fgets(line, sizeof(line), f) != NULL) {
+      name = line;
+      while (*name && isspace((int)*name)) ++name;
+      if (name[0] == '#') continue;
+      for (tmp = name; *tmp && !isspace((int)*tmp); ++tmp);
+      // no whitespace after the name means no value
+      if (*tmp != 0) {
+        *tmp = 0;
+        for (value = tmp + 1; *value && isspace((int)*value); ++value);
+        for (tmp = value + strlen(value) - 1; isspace((int)*tmp); --tmp) *tmp = 0;
+        parse_var(name, value);
+      }
+    }
+  } while (!feof(f));
+
+  fclose(f);
+
+  return 0;
+}
+
+int write_config(const char *file) {
+  FILE *f = fopen(file, "w");
+  if (f == NULL)
+    return -1;
+
+  #define CONFIG_VAR_INT(var) fprintf(f, "%s %d\n", #var, config.var)
+  #define CONFIG_VAR_FLOAT(var) fprintf(f, "%s %g\n", #var, config.var)
+  #define CONFIG_VAR_STR(var) if (config.var[0]) fprintf(f, "%s %s\n", #var, config.var)
+  CONFIG_VARS
+  #undef CONFIG_VAR_INT
+  #undef CONFIG_VAR_FLOAT
+  #undef CONFIG_VAR_STR
+
+  fclose(f);
+
+  return 0;
+}
