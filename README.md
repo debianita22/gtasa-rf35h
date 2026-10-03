@@ -142,5 +142,5 @@ times, and whether the game is CPU- or GPU-bound (`stats.log`).
 
 ## Licenses
 
-MIT (this port and gtasa_nx, see `upstream/LICENSE`); `libretro.h` is MIT
+MIT (this port: [`LICENSE`](LICENSE); gtasa_nx: [`upstream/LICENSE`](upstream/LICENSE)); `libretro.h` is MIT
 (RetroArch team). The game is Rockstar Games' and is not distributed.
